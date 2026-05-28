@@ -1,0 +1,10 @@
+# Exclude test files and dev artifacts from the Docker build context.
+# Smaller build context = faster docker build upload.
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+tests/
+.env
+*.md
+.git

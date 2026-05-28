@@ -1,0 +1,73 @@
+# RCA Agent service dependencies — pinned for reproducible builds.
+# pin every direct dependency to an exact version. Floating pins
+# (openai>=1.0) allow silent breaking changes when packages release new versions.
+
+# --- Async I/O ---
+# asyncpg: fully async PostgreSQL driver — mandatory for asyncio ReAct loop.
+asyncpg==0.29.0
+
+# --- Configuration ---
+# pydantic-settings: reads env vars and validates types at import.
+pydantic-settings==2.3.0
+
+# --- OpenAI API ---
+# openai: official async client for the GPT-4 / GPT-3.5 API.
+openai==1.35.7
+# httpx<0.28 required: openai 1.35.7 passes proxies= to httpx.Client which was
+# removed in httpx 0.28.0, causing a TypeError at import time.
+httpx<0.28
+
+# --- Kafka ---
+# confluent-kafka: C-extension wrapper around librdkafka.
+# Chosen over aiokafka for the RCA Agent because:
+#   - Significantly higher throughput than aiokafka (native C library)
+#   - The consumer loop uses run_in_executor() to handle the blocking poll()
+#   - The streaming producer uses synchronous produce() + poll(0) for low latency
+confluent-kafka==2.4.0
+
+# --- Retry ---
+# tenacity: declarative retry with exponential backoff + jitter.
+# Used to retry openai.RateLimitError in the Kafka handler.
+tenacity==8.2.3
+
+# --- Hybrid RAG ---
+# sentence-transformers is intentionally NOT installed here.
+# The CrossEncoderReranker imports it lazily inside load() which is never
+# called in main.py for the initial deployment. The reranker falls back to
+# RRF ordering (reranker.py:230) when _model is None — no crash, no
+# degraded startup. Installing sentence-transformers would pull torch (~900MB)
+# which causes pip to fail during Docker build on memory-constrained builders.
+# To enable the cross-encoder: install sentence-transformers separately and
+# call reranker.load() in main.py after CrossEncoderReranker() is created.
+
+# chromadb: vector store client — connects to the chromadb server container.
+# Version 0.4.22 matches the server image (chromadb/chroma:0.4.22) in docker-compose.
+# Using the same version as the server avoids HTTP API version mismatches.
+# 0.4.22 does NOT require grpcio or onnxruntime (those were added in 0.5.x),
+# significantly reducing the build dependency surface.
+chromadb==0.4.22
+
+# numpy<2 required: chromadb 0.4.22 uses np.float_ which was removed in NumPy 2.0.
+# Pin matches the anomaly-agent service which uses the same chromadb version.
+numpy<2
+
+# rank-bm25: BM25 sparse retrieval for the hybrid RAG pipeline.
+rank-bm25==0.2.2
+
+# --- Observability ---
+# structlog: structured JSON logging.
+structlog==24.1.0
+
+# prometheus-client: exposes /metrics for Prometheus scraping.
+prometheus-client==0.20.0
+
+# --- Pydantic (pinned to v2 for model_validate, model_dump_json) ---
+pydantic==2.7.4
+
+# --- Testing ---
+# pytest: test runner. Not a runtime dep but must be here so `pip install -r
+# requirements.txt` in CI installs it (rca-agent has no separate test-requirements).
+pytest==8.2.2
+# pytest-asyncio: makes async def test_*() functions work under pytest.
+# asyncio_mode=auto used in CI so tests need no explicit @pytest.mark.asyncio.
+pytest-asyncio==0.23.7

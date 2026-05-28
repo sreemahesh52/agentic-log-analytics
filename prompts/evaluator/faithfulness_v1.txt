@@ -1,0 +1,24 @@
+# model: gpt-3.5-turbo
+# temperature: 0.0
+# version: v1
+# purpose: Score RCA conclusion faithfulness against known ground truth
+---
+You are an expert evaluator assessing AI-generated root cause analysis quality.
+
+Known ground truth for this incident:
+{ground_truth}
+
+AI-generated RCA conclusion:
+{rca_conclusion}
+
+Score the faithfulness of the RCA conclusion against the ground truth.
+
+Scoring criteria:
+1.0 — RCA correctly identifies the exact root cause stated in ground truth
+0.8 — RCA identifies root cause correctly with minor details missing
+0.5 — RCA partially correct — right symptom, wrong underlying cause
+0.2 — RCA in the right area but significantly wrong
+0.0 — RCA identifies a completely different or incorrect root cause
+
+Respond with ONLY valid JSON, no other text:
+{"score": <float 0.0-1.0>, "reasoning": "<one sentence explaining your score>"}

@@ -1,0 +1,906 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Agentic Log Analytics — Infrastructure Services
+#
+# All image versions are pinned. Never use :latest.
+# All services run on agentic-network (bridge). No host networking.
+# All timestamps are UTC: TZ=UTC on every service.
+# All named volumes — never anonymous volumes.
+# Resource limits on every service for development parity with production.
+# depends_on uses condition:service_healthy throughout to prevent startup races.
+#
+# SECRETS: Docker Compose loads variable substitutions (${VAR}) from a .env
+# file in the SAME directory as this file (infra/.env), NOT from the repo root.
+# Create infra/.env with at minimum: OPENAI_API_KEY=sk-...
+# See ../.env.example for the full list of available variables.
+# ─────────────────────────────────────────────────────────────────────────────
+
+networks:
+  agentic-network:
+    driver: bridge
+    name: agentic-network
+
+volumes:
+  postgres_data:
+    name: agentic_postgres_data
+  redis_data:
+    name: agentic_redis_data
+  chromadb_data:
+    name: agentic_chromadb_data
+  prometheus_data:
+    name: agentic_prometheus_data
+  grafana_data:
+    name: agentic_grafana_data
+
+services:
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # PostgreSQL 16.3 — primary relational store for all 8 domain tables.
+  # UTC enforced at DB level via TZ + PGTZ + POSTGRES_INITDB_ARGS.
+  # This is the root-cause fix: TIMESTAMPTZ stores UTC internally regardless
+  # of host OS locale, but PGTZ ensures the session default is UTC too.
+  # ──────────────────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16.3
+    container_name: agentic-postgres
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: '1.0'
+    networks:
+      - agentic-network
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: loganalytics
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --lc-collate=C --lc-ctype=C"
+      TZ: UTC
+      PGTZ: UTC
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "admin", "-d", "loganalytics"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Redis 7.2.4 — semantic cache store + anomaly detection baselines.
+  # Keys namespaced per tenant: cache:{tenant_id}: and baseline:{tenant_id}:
+  # ──────────────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7.2.4
+    container_name: agentic-redis
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: '0.5'
+    networks:
+      - agentic-network
+    ports:
+      - "6379:6379"
+    environment:
+      TZ: UTC
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Zookeeper — required coordination service for Kafka 7.5.0.
+  # ──────────────────────────────────────────────────────────────────────────
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: agentic-zookeeper
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: '0.5'
+    networks:
+      - agentic-network
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+      TZ: UTC
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Kafka 7.5.0 — central message bus for all 13 topics.
+  # KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 for single-broker dev setup.
+  # PLAINTEXT listener on 9092 (internal), PLAINTEXT_HOST on 29092 (host).
+  # ──────────────────────────────────────────────────────────────────────────
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: agentic-kafka
+    restart: unless-stopped
+    mem_limit: 1g
+    cpus: '1.0'
+    networks:
+      - agentic-network
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      TZ: UTC
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # kafka-init — one-shot container that creates all 13 required topics.
+  # restart: on-failure with max 3 retries: recovers from Kafka not-yet-ready
+  # without looping forever. Topics: 3 partitions, replication-factor 1.
+  # ──────────────────────────────────────────────────────────────────────────
+  kafka-init:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: agentic-kafka-init
+    mem_limit: 128m
+    cpus: '0.25'
+    networks:
+      - agentic-network
+    environment:
+      TZ: UTC
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: "no"
+    command: >
+      bash -c "
+        echo 'Creating Kafka topics...' &&
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic logs.raw              --partitions 3 --replication-factor 1 &&
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic logs.raw.clean        --partitions 3 --replication-factor 1 &&
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic logs.enriched         --partitions 3 --replication-factor 1 &&
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic logs.dlq              --partitions 3 --replication-factor 1 &&
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic security.events       --partitions 3 --replication-factor 1 &&
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic alerts                --partitions 3 --replication-factor 1 &&
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic incidents             --partitions 3 --replication-factor 1 &&
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic incidents.compressed  --partitions 3 --replication-factor 1 &&
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic incidents.routed      --partitions 3 --replication-factor 1 &&
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic incidents.ready       --partitions 3 --replication-factor 1 &&
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic agent.results         --partitions 3 --replication-factor 1 &&
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic rca.dlq               --partitions 3 --replication-factor 1 &&
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic rca.stream            --partitions 3 --replication-factor 1 &&
+        echo 'All 13 topics created successfully.' &&
+        kafka-topics --bootstrap-server kafka:9092 --list
+      "
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Kafka UI — visual inspection of topics, consumer groups, and messages.
+  # ──────────────────────────────────────────────────────────────────────────
+  kafka-ui:
+    image: provectuslabs/kafka-ui:v0.7.1
+    container_name: agentic-kafka-ui
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: '0.5'
+    networks:
+      - agentic-network
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: agentic-local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+      TZ: UTC
+    depends_on:
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8080/actuator/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # ChromaDB 0.4.22 — vector store for anomaly embeddings and past incidents.
+  # Collections namespaced per tenant: anomaly_{tenant_id}, past_incidents_{tenant_id}
+  # ──────────────────────────────────────────────────────────────────────────
+  chromadb:
+    image: chromadb/chroma:0.4.22
+    container_name: agentic-chromadb
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: '0.5'
+    networks:
+      - agentic-network
+    ports:
+      - "8081:8081"
+    environment:
+      TZ: UTC
+      CHROMA_SERVER_HOST: 0.0.0.0
+      CHROMA_SERVER_HTTP_PORT: 8081
+      ANONYMIZED_TELEMETRY: "False"
+    command: >
+      sh -c "
+      pip install --force-reinstall --no-cache-dir 'numpy<2' &&
+      pip install --force-reinstall --no-cache-dir --no-deps chroma-hnswlib &&
+      export IS_PERSISTENT=1 &&
+      export CHROMA_SERVER_NOFILE=65535 &&
+      exec uvicorn chromadb.app:app --workers 1 --host 0.0.0.0 --port 8081 --proxy-headers --log-config chromadb/log_config.yml --timeout-keep-alive 30
+      "
+    volumes:
+      - chromadb_data:/chroma/chroma
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8081/api/v1/heartbeat', timeout=3).read()\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Prometheus v2.48.0 — scrapes metrics from all 11 application services.
+  # ──────────────────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    container_name: agentic-prometheus
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: '0.5'
+    networks:
+      - agentic-network
+    ports:
+      # Host port 9091 avoids conflicts with other local Prometheus instances
+      # or tools that bind 9090 (e.g. kubectl proxy, another dev stack).
+      # Prometheus inside the container still runs on 9090 — only the host
+      # mapping changes. Access at http://localhost:9091.
+      - "9091:9090"
+    environment:
+      TZ: UTC
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.console.libraries=/etc/prometheus/console_libraries"
+      - "--web.console.templates=/etc/prometheus/consoles"
+      - "--web.enable-lifecycle"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:9090/-/healthy || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Grafana 10.2.0 — 22-panel dashboard for all AI and platform metrics.
+  # Provisioned datasource and dashboard config mounted read-only.
+  # ──────────────────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.2.0
+    container_name: agentic-grafana
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: '0.5'
+    networks:
+      - agentic-network
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      TZ: UTC
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3000/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Application services — start with the infrastructure services via docker compose up -d.
+  # Stub services use placeholder images until their step is built.
+  # ──────────────────────────────────────────────────────────────────────────
+  log-ingestion:
+    build:
+      context: ../services/log-ingestion
+      dockerfile: Dockerfile
+    container_name: agentic-log-ingestion
+    restart: unless-stopped
+    mem_limit: 128m
+    cpus: '0.5'
+    networks:
+      - agentic-network
+    ports:
+      - "8082:8082"
+    environment:
+      TZ: UTC
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC: logs.raw
+      LOG_LEVEL: INFO
+      RATE_LIMIT_PER_SECOND: 1000
+    depends_on:
+      kafka:
+        condition: service_healthy
+      # service_completed_successfully waits for kafka-init to exit 0,
+      # meaning all 13 topics were created before log-ingestion starts.
+      # Without this, log-ingestion may try to publish to logs.raw before
+      # the topic exists (KAFKA_AUTO_CREATE_TOPICS_ENABLE is false).
+      kafka-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "/app/server", "-health-check"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Security Middleware (Python) — consumes logs.raw, runs injection and PII
+  # detection, publishes clean logs to logs.raw.clean and events to security.events.
+  # Prometheus metrics served on port 8083 for health check and scraping.
+  # ──────────────────────────────────────────────────────────────────────────
+  security-middleware:
+    build:
+      context: ../services/security-middleware
+      dockerfile: Dockerfile
+    container_name: agentic-security-middleware
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: '0.5'
+    networks:
+      - agentic-network
+    ports:
+      - "8083:8083"
+    environment:
+      TZ: UTC
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      POSTGRES_URL: postgresql://admin:admin@postgres:5432/loganalytics
+      LOG_LEVEL: INFO
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      # Wait for all 13 Kafka topics to exist before subscribing to logs.raw.
+      # service_completed_successfully = kafka-init exited 0 (topics created).
+      # Without this, the consumer sees "Unknown topic or partition" errors on
+      # startup and spins in an error loop until kafka-init finishes.
+      kafka-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8083/metrics || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ── Stub services — replaced with busybox:1.36.1 until their step is built ──
+  # busybox:1.36.1 is a real pullable image. `tail -f /dev/null` keeps the
+  # container running without consuming CPU. Each stub is replaced with a real
+  # build when its step is implemented. Resource limits are minimal since these
+  # containers do nothing. No healthcheck: no other service depends_on these stubs.
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Log Consumer (Go) — reads logs.raw.clean, batch-inserts into PostgreSQL,
+  # republishes to logs.enriched. Exposes /health and /metrics on port 8084.
+  # depends_on security-middleware so we don't start consuming before the
+  # upstream producer is ready to write clean logs.
+  # ──────────────────────────────────────────────────────────────────────────
+  log-consumer:
+    build:
+      context: ../services/log-consumer
+      dockerfile: Dockerfile
+    container_name: agentic-log-consumer
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: '0.5'
+    networks:
+      - agentic-network
+    ports:
+      - "8084:8084"
+    environment:
+      TZ: UTC
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      POSTGRES_URL: postgresql://admin:admin@postgres:5432/loganalytics
+      LOG_LEVEL: INFO
+      BATCH_SIZE: "100"
+      FLUSH_INTERVAL_SECONDS: "5"
+      MAX_RETRIES: "3"
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      # Wait for topics to be created before subscribing.
+      kafka-init:
+        condition: service_completed_successfully
+      # Wait for security-middleware so logs.raw.clean has a producer before
+      # we start consuming it. Without this, the consumer starts polling an
+      # empty topic which is harmless but produces noisy warning logs.
+      security-middleware:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/app/server", "-health-check"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Anomaly Detection Agent (Python) — consumes logs.enriched, runs statistical
+  # and semantic detection, calls GPT-3.5 for false-positive filtering, publishes
+  # confirmed alerts to Kafka (alerts topic) and PostgreSQL (alerts table).
+  # Prometheus metrics served on port 8085 (healthcheck + Prometheus scraping).
+  # prompts/ volume: read-only mount of the repo-root prompts directory so the
+  # service can load prompt files without baking them into the Docker image.
+  # ──────────────────────────────────────────────────────────────────────────
+  anomaly-agent:
+    build:
+      context: ../services/anomaly-agent
+      dockerfile: Dockerfile
+    container_name: agentic-anomaly-agent
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: '1.0'
+    networks:
+      - agentic-network
+    ports:
+      - "8085:8085"
+    environment:
+      TZ: UTC
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      POSTGRES_URL: postgresql://admin:admin@postgres:5432/loganalytics
+      REDIS_URL: redis://redis:6379
+      # chromadb listens on 8081 (host and container); no NAT translation needed.
+      # Services on agentic-network reach chromadb at http://chromadb:8081.
+      CHROMADB_URL: http://chromadb:8081
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      LOG_LEVEL: INFO
+      PROMPTS_DIR: /app/prompts
+      ANONYMIZED_TELEMETRY: "False"
+    volumes:
+      # Mount the repo-root prompts directory read-only so the anomaly-agent can
+      # load prompt files. Mounting (not COPY) means prompt updates take effect
+      # without rebuilding the image — useful for prompt iteration in development.
+      - ../prompts:/app/prompts:ro
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      chromadb:
+        condition: service_healthy
+      # Wait for all 13 topics to exist before subscribing to logs.enriched.
+      kafka-init:
+        condition: service_completed_successfully
+      # Wait for log-consumer to be healthy — it is the producer for logs.enriched.
+      # Without this, anomaly-agent may subscribe before any messages are published.
+      log-consumer:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8085/metrics', timeout=3)\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Alert Correlator (Python) — consumes alerts, groups multi-service alerts
+  # within a 60-second sliding window into CascadeIncidents, publishes all
+  # incidents to the incidents Kafka topic and the incidents PostgreSQL table.
+  # Prometheus metrics served on port 8086 for healthcheck and scraping.
+  #
+  # depends_on anomaly-agent: the alert-correlator consumes from the alerts
+  # topic, which anomaly-agent produces. Waiting for anomaly-agent healthy
+  # prevents noisy "no messages yet" startup logs.
+  # ──────────────────────────────────────────────────────────────────────────
+  alert-correlator:
+    build:
+      context: ../services/alert-correlator
+      dockerfile: Dockerfile
+    container_name: agentic-alert-correlator
+    restart: unless-stopped
+    mem_limit: 128m
+    cpus: '0.5'
+    networks:
+      - agentic-network
+    ports:
+      - "8086:8086"
+    environment:
+      TZ: UTC
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      POSTGRES_URL: postgresql://admin:admin@postgres:5432/loganalytics
+      LOG_LEVEL: INFO
+      # CORRELATION_WINDOW_SECONDS: alerts from distinct services within this
+      # many seconds are grouped into a CascadeIncident.
+      # 300s (5 min): the anomaly-agent processes logs sequentially; even with
+      # per-service cooldown deduplication, two services' confirmed alerts may
+      # arrive at the correlator minutes apart if the spike detection and LLM
+      # verification for one service completes well before the other.
+      CORRELATION_WINDOW_SECONDS: "300"
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      # Wait for all 13 Kafka topics to exist before subscribing to alerts.
+      kafka-init:
+        condition: service_completed_successfully
+      # Wait for anomaly-agent so the alerts topic has a producer before we
+      # start consuming. Prevents redundant "topic empty" startup log noise.
+      anomaly-agent:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8086/metrics', timeout=3)\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Context Compressor (Python) — consumes incidents, fetches recent logs
+  # from PostgreSQL, compresses oversized log context using GPT-3.5-turbo,
+  # and publishes enriched incidents to incidents.compressed.
+  # Prometheus metrics served on port 8087 for healthcheck and scraping.
+  #
+  # depends_on alert-correlator: the incidents topic is produced by the
+  # alert-correlator. Waiting for it to be healthy reduces noisy startup logs
+  # but is not strictly required for correctness (Kafka buffers messages).
+  #
+  # prompts/ volume: context_compressor/v1.txt is loaded at runtime.
+  # Mounting (not COPY) means prompt changes take effect without rebuilding.
+  # ──────────────────────────────────────────────────────────────────────────
+  context-compressor:
+    build:
+      context: ../services/context-compressor
+      dockerfile: Dockerfile
+    container_name: agentic-context-compressor
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: '0.5'
+    networks:
+      - agentic-network
+    ports:
+      - "8087:8087"
+    environment:
+      TZ: UTC
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      POSTGRES_URL: postgresql://admin:admin@postgres:5432/loganalytics
+      # OPENAI_API_KEY: loaded from infra/.env (never hardcoded in compose).
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      LOG_LEVEL: INFO
+      COMPRESSION_TOKEN_THRESHOLD: "6000"
+      PROMPTS_DIR: /app/prompts
+    volumes:
+      # Mount the repo-root prompts directory so the service can load
+      # context_compressor/v1.txt without baking it into the Docker image.
+      - ../prompts:/app/prompts:ro
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      # Wait for alert-correlator — it produces to the incidents topic.
+      alert-correlator:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8087/metrics', timeout=3)\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Semantic Cache (Python) — consumes incidents.compressed, embeds incident
+  # descriptions, compares against stored embeddings in Redis, routes hits
+  # directly to agent.results (LLM skipped) and misses to incidents.routed.
+  # Prometheus metrics served on port 8088 for healthcheck and scraping.
+  #
+  # depends_on context-compressor: incidents.compressed is produced by the
+  # context-compressor. Waiting for it to be healthy avoids noisy "no messages"
+  # startup logs but is not required for correctness (Kafka buffers messages).
+  # ──────────────────────────────────────────────────────────────────────────
+  semantic-cache:
+    build:
+      context: ../services/semantic-cache
+      dockerfile: Dockerfile
+    container_name: agentic-semantic-cache
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: '0.5'
+    networks:
+      - agentic-network
+    ports:
+      - "8088:8088"
+    environment:
+      TZ: UTC
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      REDIS_URL: redis://redis:6379
+      # OPENAI_API_KEY: loaded from infra/.env (never hardcoded in compose).
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      LOG_LEVEL: INFO
+      CACHE_SIMILARITY_THRESHOLD: "0.92"
+      CACHE_TTL_SECONDS: "86400"
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      # Wait for all 13 Kafka topics to exist before subscribing.
+      kafka-init:
+        condition: service_completed_successfully
+      # Wait for context-compressor — it produces to incidents.compressed.
+      context-compressor:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8088/metrics', timeout=3)\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Model Router (Python) — consumes incidents.routed (cache misses from the
+  # semantic cache), selects the appropriate LLM model based on alert severity,
+  # tenant model tier, and remaining daily budget, then publishes enriched
+  # incidents to incidents.ready with model_id and prompt_variant attached.
+  # Prometheus metrics served on port 8089 for healthcheck and scraping.
+  #
+  # Routing logic:
+  #   CRITICAL/HIGH + premium  → gpt-4-turbo
+  #   MEDIUM/LOW + premium     → gpt-3.5-turbo
+  #   any severity + standard  → gpt-3.5-turbo
+  #   budget exceeded           → DAILY_BUDGET_OVERRIDE_MODEL (gpt-3.5-turbo)
+  #
+  # depends_on semantic-cache: incidents.routed is produced by the semantic cache
+  # on cache misses. Waiting for it to be healthy avoids noisy startup logs, but
+  # is not strictly required for correctness (Kafka buffers messages).
+  # ──────────────────────────────────────────────────────────────────────────
+  model-router:
+    build:
+      context: ../services/model-router
+      dockerfile: Dockerfile
+    container_name: agentic-model-router
+    restart: unless-stopped
+    mem_limit: 128m
+    cpus: '0.5'
+    networks:
+      - agentic-network
+    ports:
+      - "8089:8089"
+    environment:
+      TZ: UTC
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      POSTGRES_URL: postgresql://admin:admin@postgres:5432/loganalytics
+      LOG_LEVEL: INFO
+      # DAILY_BUDGET_OVERRIDE_MODEL: model used when a tenant exceeds their
+      # daily token budget. Always the cheapest option to cap runaway costs.
+      DAILY_BUDGET_OVERRIDE_MODEL: gpt-3.5-turbo
+      # LOW_SKIP: set to "true" to discard LOW severity incidents without calling
+      # any LLM. Default "false" — LOW incidents are routed to gpt-3.5-turbo.
+      LOW_SKIP: "false"
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      # Wait for all 13 Kafka topics to exist before subscribing to incidents.routed.
+      kafka-init:
+        condition: service_completed_successfully
+      # Wait for semantic-cache — it is the producer for incidents.routed.
+      # Without this, the model-router may subscribe before any messages arrive.
+      semantic-cache:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8089/metrics', timeout=3)\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  rca-agent:
+    build:
+      context: ../services/rca-agent
+      dockerfile: Dockerfile
+    container_name: agentic-rca-agent
+    restart: unless-stopped
+    # 512 MB: cross-encoder model (~100 MB) + asyncpg pool + concurrent investigations.
+    mem_limit: 512m
+    # 2.0 CPUs: the ReAct loop is CPU-bound during JSON parsing and tokenisation.
+    # Multiple concurrent investigations benefit from available cores.
+    cpus: '2.0'
+    networks:
+      - agentic-network
+    ports:
+      # Port 8090: Prometheus metrics scrape endpoint.
+      - "8090:8090"
+    environment:
+      TZ: UTC
+      POSTGRES_URL: postgresql://admin:admin@postgres:5432/loganalytics
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_CONSUMER_GROUP: rca-agent-group
+      KAFKA_INCIDENTS_TOPIC: incidents.ready
+      CHROMADB_HOST: chromadb
+      # Port 8081: matches CHROMA_SERVER_HTTP_PORT in the chromadb service definition.
+      CHROMADB_PORT: 8081
+      LOG_LEVEL: INFO
+      METRICS_PORT: 8090
+      MAX_ITERATIONS: "15"
+      CONFIDENCE_THRESHOLD: "0.8"
+      # OPENAI_API_KEY: set this in .env or as a docker-compose override.
+      # Never commit real API keys to source control.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-sk-placeholder-set-in-dotenv}
+      PROMPTS_DIR: /app/prompts
+    volumes:
+      # Mount the repo-root prompts directory read-only so the rca-agent can
+      # load rca_agent/v1.txt prompt files. Mounting (not COPY) means prompt
+      # updates take effect without rebuilding the image.
+      - ../prompts:/app/prompts:ro
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      # Wait for all Kafka topics to exist before subscribing to incidents.ready.
+      kafka-init:
+        condition: service_completed_successfully
+      # Wait for model-router — it is the producer for incidents.ready.
+      model-router:
+        condition: service_healthy
+      chromadb:
+        condition: service_healthy
+    healthcheck:
+      # The Prometheus HTTP server on port 8090 confirms the service is alive.
+      # start_period=60s: the cross-encoder model takes ~30s to load from disk.
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8090/metrics', timeout=3)\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  eval-harness:
+    build:
+      context: ../services/eval-harness
+      dockerfile: Dockerfile
+    container_name: agentic-eval-harness
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: '0.5'
+    networks:
+      - agentic-network
+    # Port 8091: Prometheus metrics scrape endpoint.
+    # Without this host mapping, verify_metrics.sh (running on the host) cannot
+    # reach the prometheus_client start_http_server() thread inside the container.
+    # The healthcheck uses localhost:8091 (inside-container) and works either way;
+    # the host port mapping is required for external scraping and the verify script.
+    ports:
+      - "8091:8091"
+    environment:
+      TZ: UTC
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      POSTGRES_URL: postgresql://admin:admin@postgres:5432/loganalytics
+      REDIS_URL: redis://redis:6379
+      CHROMADB_URL: http://chromadb:8081
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL}
+      AUTO_LEARN: "true"
+      LOG_LEVEL: INFO
+      PROMPTS_DIR: /app/prompts
+    volumes:
+      # Mount the repo-root prompts directory read-only so the eval harness can
+      # load faithfulness_v1.txt and hallucination_v1.txt at runtime.
+      - ../prompts:/app/prompts:ro
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      chromadb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8091/metrics || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  api-gateway:
+    build:
+      context: ../services/api-gateway
+      dockerfile: Dockerfile
+    container_name: agentic-api-gateway
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: '0.5'
+    networks:
+      - agentic-network
+    ports:
+      - "8000:8000"
+    environment:
+      TZ: UTC
+      POSTGRES_URL: postgresql://admin:admin@postgres:5432/loganalytics
+      LOG_INGESTION_URL: http://log-ingestion:8082
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      REDIS_URL: redis://redis:6379
+      LOG_LEVEL: INFO
+    depends_on:
+      postgres:
+        condition: service_healthy
+      log-ingestion:
+        condition: service_healthy
+      # Wait for Kafka so the aiokafka producer in app.state can connect at startup.
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # React UI — developer tool panel served by nginx on port 3001.
+  # nginx proxies /api to the api-gateway container on the internal network,
+  # mirroring what Vite's dev proxy does locally. SPA routing handled via
+  # try_files fallback so React Router deep links never return 404.
+  # ──────────────────────────────────────────────────────────────────────────
+  ui:
+    build:
+      context: ../ui
+      dockerfile: Dockerfile
+    container_name: agentic-ui
+    restart: unless-stopped
+    mem_limit: 64m
+    cpus: '0.25'
+    networks:
+      - agentic-network
+    ports:
+      - "3001:3001"
+    environment:
+      TZ: UTC
+    depends_on:
+      api-gateway:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3001 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s

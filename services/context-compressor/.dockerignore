@@ -1,0 +1,28 @@
+# Exclude files that should never be in the Docker build context.
+# Smaller build context = faster docker build, fewer accidental file inclusions.
+
+# Test files: not needed in the production image.
+tests/
+*_test.py
+
+# Python byte-compile cache: Docker should never cache .pyc files.
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environments: the builder stage installs its own venv.
+.venv/
+venv/
+
+# Git metadata: large, not needed in the image.
+.git/
+.gitignore
+
+# Local development overrides.
+.env
+*.env.local
+
+# Editor and OS artefacts.
+.idea/
+.vscode/
+.DS_Store

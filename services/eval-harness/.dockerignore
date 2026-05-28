@@ -1,0 +1,33 @@
+# Python cache and bytecode — never include in Docker images.
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments — the Dockerfile creates /venv inside the image.
+.venv/
+venv/
+env/
+
+# Test artifacts — not needed at runtime.
+.pytest_cache/
+tests/
+*.pytest.ini
+pytest.ini
+
+# Development and editor files.
+.env
+.env.*
+*.env
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Git metadata — not needed in production images.
+.git/
+.gitignore
+
+# Documentation files.
+*.md

@@ -1,0 +1,128 @@
+# --- Prometheus scrape configuration ---
+# global: applies to all scrape jobs unless overridden per-job.
+# scrape_interval: how often Prometheus pulls /metrics from each target.
+# evaluation_interval: how often Prometheus evaluates alerting rules (none defined yet).
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  # external_labels: attached to all time series and alerts produced by this instance.
+  # 'environment' and 'project' allow multi-environment Grafana dashboards to filter
+  # by label rather than datasource — useful when dev and prod share one Grafana.
+  external_labels:
+    environment: development
+    project: agentic-log-analytics
+
+# rule_files: paths to alerting rule files. Empty for now — alerts are handled
+# via Grafana panels not Prometheus alertmanager in this project.
+rule_files: []
+
+# scrape_configs: one job per service. Each job:
+#   - defines the target address (host:port)
+#   - uses metrics_path: /metrics (Prometheus default, but explicit for clarity)
+#   - inherits the 15s scrape_interval from global
+#   - adds a job label so Grafana can filter by service name
+#
+# Target addresses use Docker Compose service names (not localhost) because
+# Prometheus runs inside the agentic-network bridge alongside the services.
+# On the host machine you would use localhost:<port> for local curl verification.
+
+scrape_configs:
+  # Go HTTP service — metrics served by promhttp.Handler() on port 8082.
+  - job_name: log-ingestion
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["log-ingestion:8082"]
+        labels:
+          # job label added to every time series from this target.
+          # Grafana uses {job="agentic-log-analytics"} to scope dashboard queries
+          # to only our services, excluding Prometheus's own metrics.
+          job: "agentic-log-analytics"
+
+  # Python prometheus_client start_http_server() on port 8083.
+  - job_name: security-middleware
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["security-middleware:8083"]
+        labels:
+          job: "agentic-log-analytics"
+
+  # Go HTTP service — metrics served by promhttp.Handler() on port 8084.
+  - job_name: log-consumer
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["log-consumer:8084"]
+        labels:
+          job: "agentic-log-analytics"
+
+  # Python prometheus_client start_http_server() on port 8085.
+  - job_name: anomaly-agent
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["anomaly-agent:8085"]
+        labels:
+          job: "agentic-log-analytics"
+
+  # Python prometheus_client start_http_server() on port 8086.
+  - job_name: alert-correlator
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["alert-correlator:8086"]
+        labels:
+          job: "agentic-log-analytics"
+
+  # Python prometheus_client start_http_server() on port 8087.
+  - job_name: context-compressor
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["context-compressor:8087"]
+        labels:
+          job: "agentic-log-analytics"
+
+  # Python prometheus_client start_http_server() on port 8088.
+  - job_name: semantic-cache
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["semantic-cache:8088"]
+        labels:
+          job: "agentic-log-analytics"
+
+  # Python prometheus_client start_http_server() on port 8089.
+  - job_name: model-router
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["model-router:8089"]
+        labels:
+          job: "agentic-log-analytics"
+
+  # Python prometheus_client start_http_server() on port 8090.
+  - job_name: rca-agent
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["rca-agent:8090"]
+        labels:
+          job: "agentic-log-analytics"
+
+  # Python prometheus_client start_http_server() on port 8091.
+  - job_name: eval-harness
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["eval-harness:8091"]
+        labels:
+          job: "agentic-log-analytics"
+
+  # FastAPI service — metrics served by prometheus-fastapi-instrumentator at /metrics.
+  # The instrumentator auto-registers http_requests_total and http_request_duration_seconds.
+  - job_name: api-gateway
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["api-gateway:8000"]
+        labels:
+          job: "agentic-log-analytics"
+
+  # Pushgateway — accepts pushed metrics from seed_demo_data.py.
+  # honor_labels: true preserves the tenant/prompt_version labels pushed by the client.
+  # If pushgateway is not running, Prometheus shows this target as DOWN (no error).
+  - job_name: pushgateway
+    honor_labels: true
+    static_configs:
+      - targets: ["pushgateway:9091"]

@@ -1,0 +1,59 @@
+# Anomaly Agent service dependencies — all versions pinned for reproducibility.
+# Run: pip install -r requirements.txt
+
+# --- Kafka ---
+# confluent-kafka is the official Confluent Python client, backed by librdkafka.
+# Chosen over kafka-python: better throughput, better rebalancing, actively maintained.
+confluent-kafka==2.4.0
+
+# --- Redis ---
+# redis is the official Python Redis client.
+# Used by StatisticalDetector for sliding-window baseline storage.
+redis==5.0.7
+
+# --- Redis test double ---
+# fakeredis provides an in-memory Redis implementation for unit tests.
+# Tests can use FakeRedis() instead of a real Redis server — zero infrastructure needed.
+fakeredis==2.23.2
+
+# --- Vector database ---
+# chromadb for semantic detector: stores and queries log message embeddings.
+# Used in step 7b (SemanticDetector) — included here for the full service requirements.
+chromadb==0.4.22
+# numpy<2 required: chromadb 0.4.22 uses np.float_ which was removed in NumPy 2.0.
+numpy<2
+
+# --- OpenAI ---
+# openai for the LLM Verifier: GPT-3.5 filters false positives from anomaly detectors.
+openai==1.40.0
+# httpx<0.28 required: openai 1.40.0 passes proxies= to httpx.Client, which was
+# removed in httpx 0.28.0, causing a TypeError at import time.
+httpx<0.28
+
+# --- Database ---
+# psycopg2-binary for PostgreSQL access in tools (QueryLogs, GetDependencies).
+# Binary distribution avoids needing libpq headers at build time.
+psycopg2-binary==2.9.9
+
+# --- Validation & Configuration ---
+# pydantic v2 for LogEvent and AlertPayload models (wire format validation).
+pydantic==2.7.4
+# pydantic-settings for BaseSettings config — fails fast if required env vars missing.
+pydantic-settings==2.3.0
+
+# --- Observability ---
+# prometheus-client exposes the /metrics HTTP endpoint scraped by Prometheus.
+prometheus-client==0.20.0
+# structlog formats all log output as JSON with consistent fields.
+# Never use Python's default logging module — it produces unstructured text.
+structlog==24.1.0
+
+# --- Runtime utilities ---
+# python-dotenv loads .env files during local development without code changes.
+python-dotenv==1.0.0
+
+# --- Testing ---
+# pytest is the test runner. Version pinned to avoid behaviour changes.
+pytest==8.2.2
+# pytest-asyncio enables async test functions for future async tests.
+pytest-asyncio==0.23.7

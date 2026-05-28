@@ -1,0 +1,43 @@
+# Security Middleware service dependencies — all versions pinned for reproducibility.
+# Run: pip install -r requirements.txt
+
+# --- Kafka ---
+# confluent-kafka is the official Confluent Python client, backed by librdkafka.
+# Chosen over kafka-python: librdkafka has better throughput, better rebalancing,
+# and is actively maintained by Confluent.
+confluent-kafka==2.4.0
+
+# --- Database ---
+# asyncpg is a high-performance PostgreSQL driver using the binary protocol.
+# Chosen over psycopg2 because it is natively async — no thread-pool bridging
+# needed when calling from asyncio coroutines (audit.py uses async with pool.acquire()).
+# asyncpg also has a built-in connection pool with min/max configuration.
+asyncpg==0.29.0
+
+# --- Validation & Configuration ---
+# pydantic v2 provides fast Rust-backed validation for all data models.
+pydantic==2.7.4
+# pydantic-settings extends pydantic BaseSettings for environment-variable config.
+# Used by the consumer to fail fast if required env vars are missing.
+pydantic-settings==2.3.0
+
+# --- Observability ---
+# prometheus-client exposes the /metrics HTTP endpoint scraped by Prometheus.
+prometheus-client==0.20.0
+# structlog formats all log output as JSON with consistent fields.
+# Never use Python's default logging module — it produces unstructured text.
+structlog==24.1.0
+
+# --- Runtime utilities ---
+# python-dotenv loads .env files during local development without code changes.
+python-dotenv==1.0.0
+
+# --- Testing ---
+# pytest is the test runner. Version pinned to avoid behaviour changes.
+pytest==8.2.2
+# pytest-asyncio enables --asyncio-mode=auto so async test functions are discovered.
+pytest-asyncio==0.23.7
+# fakeredis provides an in-memory Redis implementation for unit tests.
+# Used in step 7a (Anomaly Detection) to test Redis-backed baselines without
+# a real Redis server. Included here so the full test suite has one requirements file.
+fakeredis==2.23.2

@@ -1,0 +1,76 @@
+# Demo-mode environment variable overrides + Prometheus Pushgateway.
+#
+# This file:
+#   1. Sets CORRELATION_WINDOW_SECONDS=30 on alert-correlator (300 → 30 s)
+#   2. Adds a Prometheus Pushgateway so seed_demo_data.py can push metrics
+#      directly into Prometheus — filling every Grafana panel without needing
+#      the full Kafka pipeline to run.
+#
+# Usage — append this file to the normal compose command:
+#
+#   docker compose -f infra/docker-compose.yml \
+#                  -f infra/docker-compose.demo.yml \
+#                  --profile app up -d
+#
+# To restart only the two demo-specific services on an already-running stack:
+#
+#   docker compose -f infra/docker-compose.yml \
+#                  -f infra/docker-compose.demo.yml \
+#                  up -d --no-deps alert-correlator pushgateway prometheus
+#
+# WHAT CHANGES
+# ─────────────────────────────────────────────────────────────────────────────
+# alert-correlator  CORRELATION_WINDOW_SECONDS  300 → 30
+#   Keeps Phase 4 of the demo script under 2 minutes.
+#
+# pushgateway  (new container)
+#   Prometheus Pushgateway on host port 9093 (container port 9091).
+#   seed_demo_data.py pushes metrics here via PUSHGATEWAY_URL=http://localhost:9093.
+#   Prometheus (prometheus.yml pushgateway job) scrapes it every 15 s.
+#   (Port 9092 is Kafka's internal listener — 9093 avoids the conflict.)
+#
+# prometheus  (prometheus.yml already has the pushgateway scrape job)
+#   Needs a reload/restart to pick up the pushgateway job if Prometheus was
+#   already running before this file was applied.
+#
+# NO production service code is modified by this file.
+
+services:
+  alert-correlator:
+    environment:
+      CORRELATION_WINDOW_SECONDS: "30"
+
+  pushgateway:
+    image: prom/pushgateway:v1.6.2
+    container_name: agentic-pushgateway
+    # Persist pushed metrics to disk so seed data survives container restarts.
+    # Without persistence, all metrics are lost on restart and the Grafana
+    # tenant variable becomes empty until seed_demo_data.py is re-run.
+    command:
+      - "--persistence.file=/data/pushgateway.db"
+      - "--persistence.interval=5m"
+    volumes:
+      - pushgateway_data:/data
+    ports:
+      - "9093:9091"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9091/-/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    mem_limit: 64m
+    cpus: 0.2
+    networks:
+      - agentic-network
+
+# Reference the network defined in docker-compose.yml so the pushgateway
+# container can join it and Prometheus can scrape it.
+networks:
+  agentic-network:
+    external: true
+    name: agentic-network
+
+volumes:
+  pushgateway_data:
+    name: agentic_pushgateway_data

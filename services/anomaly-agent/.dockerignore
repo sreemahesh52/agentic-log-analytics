@@ -1,0 +1,38 @@
+# Exclude files that should not be in the Docker build context.
+# Smaller context = faster docker build (less data sent to the Docker daemon).
+
+# Python bytecode and caches — not needed in the image
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments — the Dockerfile creates its own venv in the builder stage
+.venv/
+venv/
+env/
+
+# Test files — not needed in the production image
+tests/
+test_*.py
+*_test.py
+pytest.ini
+.pytest_cache/
+
+# Development and IDE files
+.env
+.env.*
+*.env
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Git metadata
+.git/
+.gitignore
+
+# Documentation
+*.md
+README*

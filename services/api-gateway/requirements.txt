@@ -1,0 +1,16 @@
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
+httpx==0.27.0
+asyncpg==0.29.0
+pydantic-settings==2.3.0
+prometheus-fastapi-instrumentator==7.0.0
+structlog==24.1.0
+python-dotenv==1.0.0
+# Async Redis client — used by the cache stats router to read SemanticCache metrics.
+# The gateway shares the same Redis namespace as the semantic-cache service
+# (cache:{tenant_id}:*) so stats can be read without an inter-service HTTP call.
+redis==5.0.6
+# aiokafka: async Kafka producer for POST /api/v1/investigations/trigger.
+# Pure Python — no C-extension native libraries needed.
+# Consistent with alert-correlator and model-router (same version).
+aiokafka==0.10.0

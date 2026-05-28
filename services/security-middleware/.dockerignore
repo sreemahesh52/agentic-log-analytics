@@ -1,0 +1,31 @@
+# Python compiled files — not needed in Docker images
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+
+# Virtual environments — always use the Docker layer, never copy venv
+.venv/
+venv/
+env/
+
+# Test infrastructure — not needed at runtime
+tests/
+.pytest_cache/
+pytest.ini
+setup.cfg
+
+# Local development overrides — never bake secrets into images
+.env
+.env.local
+
+# Distribution artifacts
+dist/
+build/
+
+# IDE and OS noise
+.idea/
+.vscode/
+.DS_Store
+*.swp

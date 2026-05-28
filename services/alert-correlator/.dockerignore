@@ -1,0 +1,22 @@
+# Exclude test files and development artefacts from the Docker build context.
+# Smaller build context = faster docker build (less data sent to Docker daemon).
+
+# Test files are not needed in the runtime image.
+tests/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Local development files — never bake secrets into an image.
+.env
+*.env
+
+# Editor and OS artefacts.
+.idea/
+.vscode/
+.DS_Store
+
+# Git history not needed in image.
+.git/

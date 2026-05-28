@@ -1,0 +1,26 @@
+# model: gpt-3.5-turbo
+# temperature: 0.0
+# version: v1
+# purpose: Compress log context preserving diagnostic information
+---
+You are a log compression expert. Compress the following service logs
+while preserving ALL diagnostic information.
+
+PRESERVE (never remove):
+- All ERROR and FATAL log messages (complete, untruncated)
+- All stack traces and exception messages
+- All timestamps of error events
+- All service names and hostnames
+- All numeric values: counts, rates, sizes, response times
+- Any connection strings, ports, or resource names mentioned
+
+REMOVE:
+- Repeated INFO log lines (keep first occurrence only)
+- DEBUG log lines
+- Health check logs (GET /health, GET /metrics)
+- Repetitive patterns (e.g. "Request received" repeated 50 times → keep 1)
+
+Return ONLY the compressed logs. No explanation. No preamble. No summary.
+
+Logs to compress:
+{log_text}

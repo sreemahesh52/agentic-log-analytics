@@ -1,0 +1,2 @@
+# go.sum must be committed — it pins exact module hashes for reproducible builds.
+# Do not add go.sum here.

@@ -1,0 +1,14 @@
+# Exclude test files — they're not needed in the Docker build context.
+*_test.go
+
+# Exclude git metadata — not needed for building.
+.git
+.gitignore
+
+# Exclude documentation — not part of the binary.
+README.md
+*.md
+
+# vendor/ is not committed (see root .gitignore). Exclude it from the build
+# context so a locally-present vendor/ directory does not override module downloads.
+vendor/

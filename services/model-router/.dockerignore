@@ -1,0 +1,26 @@
+# Exclude files that should not be copied into the Docker build context.
+# Smaller context = faster builds and less chance of leaking secrets.
+
+# Python bytecode and caches — regenerated at runtime, not needed in image.
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+
+# Test files — not needed in the production image.
+tests/
+
+# Git metadata — not needed in the image.
+.git
+.gitignore
+
+# Local environment overrides — never bake .env into a Docker image.
+.env
+
+# Editor and OS noise.
+.idea
+.vscode
+*.DS_Store
+
+# Documentation — not needed at runtime.
+README.md

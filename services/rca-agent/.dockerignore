@@ -1,0 +1,40 @@
+# Exclude files that should never be copied into the Docker image.
+# .dockerignore is evaluated relative to the build context (services/rca-agent/).
+
+# Python bytecode and caches — regenerated at runtime, bloat the image.
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments — the Dockerfile uses pip install directly.
+.venv/
+venv/
+env/
+
+# Test directories — not needed in production image.
+tests/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Development files
+.env
+.env.*
+*.log
+
+# Git metadata — not needed at runtime.
+.git/
+.gitignore
+
+# Editor/IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Sentence-transformers model cache — models are downloaded at runtime on first use
+# or pre-loaded via the CrossEncoderReranker singleton. Including local model caches
+# would bloat the image by hundreds of MB.
+.cache/

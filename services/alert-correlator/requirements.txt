@@ -1,0 +1,25 @@
+# Alert Correlator service dependencies.
+# All versions pinned for reproducible builds.
+# Never use open ranges like >=x.y in production service requirements.
+
+# Async Kafka client: consumer + producer with manual offset commit support.
+aiokafka==0.10.0
+
+# Async PostgreSQL driver with connection pooling.
+asyncpg==0.29.0
+
+# Settings validation from environment variables — fail fast on missing vars.
+pydantic-settings==2.3.0
+
+# Structured JSON logging.
+structlog==24.1.0
+
+# Prometheus metrics exposition.
+prometheus-client==0.20.0
+
+# Retry with exponential backoff for Kafka publish (Circuit Breaker).
+tenacity==8.3.0
+
+# Testing — not needed at runtime but pinned for CI reproducibility.
+pytest==8.2.0
+pytest-asyncio==0.23.7

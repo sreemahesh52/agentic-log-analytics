@@ -1,0 +1,10 @@
+psycopg2-binary==2.9.9
+chromadb==0.4.22
+numpy<2.0
+httpx<0.28.0
+openai==1.40.0
+python-dotenv==1.0.0
+structlog==24.1.0
+requests==2.31.0
+redis==5.0.1
+prometheus-client==0.19.0

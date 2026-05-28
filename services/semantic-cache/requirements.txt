@@ -1,0 +1,46 @@
+# Semantic Cache service dependencies.
+# All versions pinned for reproducible builds.
+# Never use open ranges like >=x.y — silent upgrades can break behaviour.
+
+# Async Kafka client: consumer + producer with manual offset commit support.
+aiokafka==0.10.0
+
+# Async Redis client. redis.asyncio is the official async interface bundled
+# with the redis package. We import as `from redis.asyncio import Redis`.
+redis==5.0.6
+
+# OpenAI Python SDK v1.x — AsyncOpenAI for non-blocking embedding calls.
+openai==1.40.0
+
+# httpx 0.28+ dropped the `proxies` argument that openai 1.40.0 passes internally.
+# Pin to the last compatible version to prevent AsyncClient init TypeError.
+httpx==0.27.2
+
+# NumPy for cosine similarity computation.
+# float32 arrays reduce memory usage; precision is more than sufficient for
+# two-decimal-place similarity thresholds.
+numpy==1.26.4
+
+# Settings validation from environment variables — fail fast on missing vars.
+pydantic-settings==2.3.0
+
+# Structured JSON logging.
+structlog==24.1.0
+
+# Prometheus metrics exposition.
+prometheus-client==0.20.0
+
+# Retry with exponential backoff for Kafka publish (Circuit Breaker).
+tenacity==8.3.0
+
+# --- Test dependencies (pinned for CI reproducibility) ---
+
+# Unit testing framework.
+pytest==8.2.0
+
+# pytest plugin for running async test functions with asyncio.
+pytest-asyncio==0.23.7
+
+# In-memory Redis fake compatible with redis.asyncio (FakeAsyncRedis).
+# Allows tests to run without a real Redis instance.
+fakeredis==2.23.2

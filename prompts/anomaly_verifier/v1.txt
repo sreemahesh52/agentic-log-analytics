@@ -1,0 +1,15 @@
+# model: gpt-3.5-turbo
+# temperature: 0.0
+# version: v1
+# purpose: Filter statistical and semantic anomaly false positives
+---
+Context: The anomaly detection system has flagged a potential issue.
+Service: {service}
+Anomaly description: {anomaly_description}
+
+Recent log samples from this service:
+{sample_logs}
+
+Is this a real anomaly requiring investigation, or noise/expected behaviour?
+Answer YES if real anomaly. Answer NO if noise.
+Answer with YES or NO only.

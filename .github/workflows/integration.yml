@@ -1,0 +1,128 @@
+# Integration workflow — runs on pull requests targeting main only.
+# Starts the full Docker stack, seeds test data, and runs smoke_test.sh.
+# This is intentionally slower than ci.yml (2-5 minutes startup vs seconds).
+# Do not run on every push — Docker pull + service startup is too expensive for that.
+
+name: Integration Tests
+
+on:
+  pull_request:
+    # Only PRs targeting main trigger the full integration suite.
+    # Feature branches use ci.yml (unit tests only) for fast feedback.
+    branches: [main]
+
+# Concurrency group: one integration run per PR at a time.
+# cancel-in-progress: if two commits are pushed to the same PR quickly,
+# the first integration run is cancelled and only the second runs.
+# This prevents two VMs from running the full Docker stack simultaneously for the same PR.
+concurrency:
+  group: integration-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    # Hard deadline: kills the entire job after 20 minutes.
+    # Prevents hung services or infinite waits from consuming runner resources forever.
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Python 3.11 for seed_tenants.py (runs before app services start).
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Minimal Python deps for seed scripts — not the full application stack.
+      # psycopg2-binary: synchronous PostgreSQL driver used by seed_tenants.py.
+      # requests: HTTP client used by smoke_test.sh indirectly via generate_logs.py.
+      # python-dotenv: loads .env for local runs (no-op in CI where vars are injected).
+      - name: Install Python deps for seed scripts
+        run: pip install psycopg2-binary==2.9.9 requests==2.31.0 python-dotenv==1.0.0 structlog==24.1.0
+
+      # Start only infrastructure services (postgres, redis, kafka, zookeeper,
+      # chromadb, prometheus, grafana, kafka-ui). Application services use
+      # --profile app and start separately after the infra is healthy.
+      # This two-phase startup mirrors production practices where infra is stable
+      # before any application connects to it.
+      - name: Start infrastructure
+        run: docker compose -f infra/docker-compose.yml up -d
+
+      # Poll until all infrastructure services report "healthy".
+      # The grep logic:
+      #   1. `docker compose ps` outputs service name + status per line
+      #   2. `grep -Ev "healthy|Name|---"` removes lines for already-healthy services
+      #      and removes header/separator lines
+      #   3. `grep -qE "running|starting"` checks if any services are still transitioning
+      #   When all services are healthy, step 2 produces empty output and step 3
+      #   returns non-zero → `until` condition becomes true → loop exits.
+      # `|| true` handles the 120-second timeout gracefully (exit code 124 → 0).
+      - name: Wait for infrastructure healthy
+        run: |
+          echo "Waiting for all infrastructure services to be healthy..."
+          timeout 120 bash -c '
+            until ! docker compose -f infra/docker-compose.yml ps | \
+              grep -Ev "healthy|Name|---" | grep -qE "running|starting"; do
+              echo "Still waiting..."
+              sleep 5
+            done
+          ' || true
+          sleep 10
+          docker compose -f infra/docker-compose.yml ps
+
+      # seed_tenants.py inserts acme-corp and startup-co into the tenants table.
+      # Idempotent: uses INSERT ... ON CONFLICT DO NOTHING so re-runs are safe.
+      # Must run before app services start because the log-consumer and
+      # security-middleware validate tenant_id on every Kafka message.
+      - name: Seed tenants
+        run: python scripts/seed_tenants.py
+        env:
+          POSTGRES_URL: postgresql://admin:admin@localhost:5432/loganalytics
+
+      # Start all application services using the `app` Docker Compose profile.
+      # OPENAI_API_KEY comes from GitHub Actions secrets — never hardcoded.
+      # If the secret is not set, the RCA agent will start but fail on any LLM call.
+      # The smoke tests do not trigger RCA, so a missing key does not fail smoke tests.
+      - name: Start application services
+        run: docker compose -f infra/docker-compose.yml --profile app up -d
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+      # Wait for application services to become healthy.
+      # 30 seconds is intentional — services pull images on first run and
+      # initialize database connection pools before responding to health checks.
+      - name: Wait for app services healthy
+        run: |
+          echo "Waiting for application services..."
+          sleep 30
+          docker compose -f infra/docker-compose.yml --profile app ps
+
+      # Run the smoke test script. SMOKE_TEST_BASE_URL points to the API gateway.
+      # chmod +x ensures the script is executable even if git lost the execute bit.
+      # set -e in smoke_test.sh exits with code 1 if any test fails,
+      # which causes this step to fail and blocks the PR from merging.
+      - name: Run smoke tests
+        run: |
+          chmod +x scripts/smoke_test.sh
+          bash scripts/smoke_test.sh
+        env:
+          SMOKE_TEST_BASE_URL: http://localhost:8000
+
+      # On failure: print the last 30 log lines from every app service.
+      # This surfaces the root cause (missing env var, startup error, crash)
+      # without having to re-run the entire workflow with additional debugging.
+      # `if: failure()` runs only when a previous step failed.
+      - name: Print service logs on failure
+        if: failure()
+        run: |
+          echo "=== Failed — printing service logs ==="
+          docker compose -f infra/docker-compose.yml --profile app logs --tail=30
+
+      # Always clean up: stop containers and remove volumes.
+      # `if: always()` runs even if earlier steps failed or were cancelled.
+      # This prevents orphaned Docker containers from accumulating on the runner
+      # and consuming disk space across runs.
+      - name: Cleanup
+        if: always()
+        run: docker compose -f infra/docker-compose.yml --profile app down -v
