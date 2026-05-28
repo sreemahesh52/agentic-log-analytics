@@ -1,6 +1,6 @@
 # Agentic Log Analytics
 
-[![CI](https://github.com/sreemahesh52/agentic-log-analytics/actions/workflows/ci.yml/badge.svg)](https://github.com/sreemahesh52/agentic-log-analytics/actions/workflows/ci.yml)
+[![CI](https://github.com/sreemahesh52/argus/actions/workflows/ci.yml/badge.svg)](https://github.com/sreemahesh52/argus/actions/workflows/ci.yml)
 
 A multi-tenant, event-driven platform that ingests structured logs, detects anomalies, and produces AI-generated root cause analyses — with semantic caching, prompt A/B testing, and end-to-end faithfulness evaluation.
 
@@ -204,8 +204,8 @@ The system is multi-tenant from the ground up. Each tenant carries a hashed API 
 ### 1. Clone and configure
 
 ```bash
-git clone https://github.com/sreemahesh52/agentic-log-analytics.git
-cd agentic-log-analytics
+git clone https://github.com/sreemahesh52/argus.git
+cd argus
 cp .env.example infra/.env
 ```
 
