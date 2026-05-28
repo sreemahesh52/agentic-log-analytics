@@ -1,4 +1,5 @@
-# Agentic Log Analytics
+# Argus
+### Autonomous Root Cause Analysis for Distributed Systems using LLM Agents and Hybrid RAG
 
 [![CI](https://github.com/sreemahesh52/argus/actions/workflows/ci.yml/badge.svg)](https://github.com/sreemahesh52/argus/actions/workflows/ci.yml)
 
